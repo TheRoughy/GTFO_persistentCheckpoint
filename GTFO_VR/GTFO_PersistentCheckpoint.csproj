@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>GTFO_PersistentCheckpoint</AssemblyName>
+    <RootNamespace>GTFO.PersistentCheckpoint</RootNamespace>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <GTFO_PATH Condition="'$(GTFO_PATH)' == ''">C:\Program Files (x86)\Steam\steamapps\common\GTFO</GTFO_PATH>
+    <DeployPlugin Condition="'$(DeployPlugin)' == ''">true</DeployPlugin>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="0Harmony" HintPath="$(GTFO_PATH)\BepInEx\core\0Harmony.dll" Private="false" />
+    <Reference Include="BepInEx.Core" HintPath="$(GTFO_PATH)\BepInEx\core\BepInEx.Core.dll" Private="false" />
+    <Reference Include="BepInEx.Unity.IL2CPP" HintPath="$(GTFO_PATH)\BepInEx\core\BepInEx.Unity.IL2CPP.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Common" HintPath="$(GTFO_PATH)\BepInEx\core\Il2CppInterop.Common.dll" Private="false" />
+    <Reference Include="Il2CppInterop.Runtime" HintPath="$(GTFO_PATH)\BepInEx\core\Il2CppInterop.Runtime.dll" Private="false" />
+    <Reference Include="Il2Cppmscorlib" HintPath="$(GTFO_PATH)\BepInEx\interop\Il2Cppmscorlib.dll" Private="false" />
+    <Reference Include="Il2CppSystem" HintPath="$(GTFO_PATH)\BepInEx\interop\Il2CppSystem.dll" Private="false" />
+    <Reference Include="GameData-ASM" HintPath="$(GTFO_PATH)\BepInEx\interop\GameData-ASM.dll" Private="false" />
+    <Reference Include="GlobalFramework-ASM" HintPath="$(GTFO_PATH)\BepInEx\interop\GlobalFramework-ASM.dll" Private="false" />
+    <Reference Include="Modules-ASM" HintPath="$(GTFO_PATH)\BepInEx\interop\Modules-ASM.dll" Private="false" />
+    <Reference Include="SNet_ASM" HintPath="$(GTFO_PATH)\BepInEx\interop\SNet_ASM.dll" Private="false" />
+    <Reference Include="Unity.TextMeshPro" HintPath="$(GTFO_PATH)\BepInEx\interop\Unity.TextMeshPro.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(GTFO_PATH)\BepInEx\interop\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(GTFO_PATH)\BepInEx\interop\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.Physics2DModule" HintPath="$(GTFO_PATH)\BepInEx\interop\UnityEngine.Physics2DModule.dll" Private="false" />
+    <Reference Include="Utils-ASM" HintPath="$(GTFO_PATH)\BepInEx\interop\Utils-ASM.dll" Private="false" />
+  </ItemGroup>
+  <Target Name="Deploy" AfterTargets="Build" Condition="'$(DeployPlugin)' == 'true'">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GTFO_PATH)\BepInEx\plugins" />
+  </Target>
+</Project>
