@@ -1,5 +1,6 @@
 using CellMenu;
 using GTFO.PersistentCheckpoint.Persistence;
+using TMPro;
 using UnityEngine;
 
 namespace GTFO.PersistentCheckpoint.Core;
@@ -73,6 +74,7 @@ internal sealed class PersistentCheckpointController : MonoBehaviour
             button.m_clickType = eTimedButtonClickType.Instant;
             button.SetSize(new Vector2(520f, 80f));
             button.Setup();
+            ShiftButtonTextRight(button, 40f);
             button.OnBtnPressCallback = new Action<int>(_ => ResumeCoordinator.ToggleResume());
             _resumeButton = button;
             UpdateResumeButton();
@@ -81,6 +83,12 @@ internal sealed class PersistentCheckpointController : MonoBehaviour
         {
             Log.Error($"Failed to create resume checkpoint UI: {exception}");
         }
+    }
+
+    private static void ShiftButtonTextRight(CM_TimedButton button, float offset)
+    {
+        foreach (var text in button.GetComponentsInChildren<TextMeshPro>(includeInactive: true))
+            text.transform.localPosition += new Vector3(offset, 0f, 0f);
     }
 
     private void UpdateResumeButton()
