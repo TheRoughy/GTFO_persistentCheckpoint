@@ -11,11 +11,19 @@ namespace GTFO.PersistentCheckpoint.Persistence;
 internal static class ResumeCoordinator
 {
     private static MethodInfo? _setActiveExpedition;
+    private static MethodInfo? _startSinglePlayerRecall;
     private static pActiveExpedition _freshPackage = null!;
     private static bool _hasFreshPackage;
     private static bool _applyingPackage;
     private static bool _suppressCheckpointSave;
     private static int _requiredSlotCapacity = 4;
+    private static readonly Queue<PlayerResync> PlayerResyncQueue = new();
+    private static PlayerResync? _activePlayerResync;
+    private static float _activePlayerResyncDeadline;
+    private static float _nextPlayerResyncTime;
+
+    private const float PlayerResyncDelaySeconds = 0.25f;
+    private const float PlayerResyncTimeoutSeconds = 45f;
 
     internal static CheckpointSnapshot? ActiveSnapshot { get; private set; }
     internal static CheckpointSnapshot? PendingRecall { get; private set; }
@@ -173,6 +181,78 @@ internal static class ResumeCoordinator
         return true;
     }
 
+    internal static void UpdatePlayerResync()
+    {
+        if (!SNet.IsMaster || GameStateManager.CurrentStateName != eGameStateName.InLevel)
+        {
+            ClearPlayerResyncs();
+            return;
+        }
+
+        if (_activePlayerResync != null)
+        {
+            var active = _activePlayerResync;
+            var player = FindSlottedPlayer(active.Lookup);
+            if (player == null || !player.IsInSessionHub)
+            {
+                Log.Warning($"Skipping checkpoint hard-sync for {active.DisplayName} ({active.Lookup}): player disconnected.");
+                _activePlayerResync = null;
+                _nextPlayerResyncTime = Time.realtimeSinceStartup + PlayerResyncDelaySeconds;
+            }
+            else if (player.SyncProcessState == eSyncProcessState.ProcessDone
+                     && player.Session.mode == eReplicationMode.Playing
+                     && player.HasPlayerAgent)
+            {
+                Log.Info(
+                    $"Checkpoint hard-sync completed for {player.NickName} ({player.Lookup}); " +
+                    $"agent key {GetPlayerAgentKey(player)}.");
+                _activePlayerResync = null;
+                _nextPlayerResyncTime = Time.realtimeSinceStartup + PlayerResyncDelaySeconds;
+            }
+            else if (Time.realtimeSinceStartup >= _activePlayerResyncDeadline)
+            {
+                var message =
+                    $"Checkpoint hard-sync timed out for {player.NickName} ({player.Lookup}). " +
+                    "That player should leave and rejoin.";
+                Log.Error(message);
+                ShowHostWarning($"CHECKPOINT SYNC FAILED: {player.NickName}\nLEAVE AND REJOIN");
+                ClearPlayerResyncs();
+                return;
+            }
+        }
+
+        if (_activePlayerResync != null || Time.realtimeSinceStartup < _nextPlayerResyncTime)
+            return;
+
+        while (PlayerResyncQueue.Count > 0)
+        {
+            var pending = PlayerResyncQueue.Dequeue();
+            var player = FindSlottedPlayer(pending.Lookup);
+            if (player == null || !player.IsInSessionHub)
+            {
+                Log.Warning($"Skipping checkpoint hard-sync for {pending.DisplayName} ({pending.Lookup}): player disconnected.");
+                continue;
+            }
+
+            try
+            {
+                StartPlayerHardSync(player);
+                _activePlayerResync = pending;
+                _activePlayerResyncDeadline = Time.realtimeSinceStartup + PlayerResyncTimeoutSeconds;
+                Log.Info(
+                    $"Started checkpoint hard-sync for {player.NickName} ({player.Lookup}); " +
+                    $"agent key {GetPlayerAgentKey(player)}.");
+            }
+            catch (Exception exception)
+            {
+                Log.Error($"Failed to start checkpoint hard-sync for {player.NickName} ({player.Lookup}): {exception}");
+                ShowHostWarning($"CHECKPOINT SYNC FAILED: {player.NickName}\nLEAVE AND REJOIN");
+                ClearPlayerResyncs();
+            }
+            return;
+        }
+    }
+
     internal static void ClearOnSuccess()
     {
         if (!SNet.IsMaster || string.IsNullOrEmpty(ActiveExpeditionKey))
@@ -181,6 +261,7 @@ internal static class ResumeCoordinator
         PendingRecall = null;
         ActiveSnapshot = null;
         ResumeSelected = false;
+        ClearPlayerResyncs();
         CheckpointStore.EnqueueDelete(ActiveExpeditionKey);
         Log.Info($"Expedition succeeded; deleted checkpoint for {ActiveExpeditionKey}.");
     }
@@ -226,6 +307,8 @@ internal static class ResumeCoordinator
             if (snapshot.Passes.Count != SNet_CaptureBuffer.PassCount)
                 throw new InvalidOperationException($"Checkpoint has {snapshot.Passes.Count} capture passes, game expects {SNet_CaptureBuffer.PassCount}.");
 
+            var connectedHumans = CaptureConnectedHumans(snapshot);
+
             _suppressCheckpointSave = true;
             SNet.Capture.CaptureGameState(eBufferType.Checkpoint);
             buffer = SNet.Capture.m_buffers[(int)eBufferType.Checkpoint];
@@ -249,21 +332,8 @@ internal static class ResumeCoordinator
             buffer.isValid = true;
 
             CheckpointManager.ReloadCheckpoint();
-            if (!SNet.Sync.SessionCommand(eSessionCommandType.ForceStartPlaying))
-                Log.Warning("GTFO rejected ForceStartPlaying before persistent checkpoint recall; continuing with recall.");
-
-            SNet.Sync.StartRecallCheckpointWithAllSyncedPlayers();
-
-            // Some current game builds return from the sync-manager helper without
-            // recalling on the host when it is already in Playing mode. Remote peers
-            // still receive the buffer command, so apply the same buffer locally.
-            if (Math.Abs(Clock.ExpeditionProgressionTime - snapshot.ProgressionTime) > 0.01f)
-            {
-                Log.Warning(
-                    $"Sync-manager recall did not apply locally (time {Clock.ExpeditionProgressionTime:F2}, " +
-                    $"expected {snapshot.ProgressionTime:F2}); invoking the checkpoint buffer directly.");
-                SNet.Capture.RecallGameState(eBufferType.Checkpoint);
-            }
+            SNet.Capture.InitCheckpointRecall();
+            SNet.Capture.RecallGameState(eBufferType.Checkpoint);
 
             if (Math.Abs(Clock.ExpeditionProgressionTime - snapshot.ProgressionTime) > 0.01f)
                 throw new InvalidOperationException(
@@ -273,6 +343,7 @@ internal static class ResumeCoordinator
             Log.Info(
                 $"Recalled persistent checkpoint for {snapshot.ExpeditionKey} at " +
                 $"{Clock.ExpeditionProgressionTime:F2} seconds.");
+            QueuePlayerResyncs(connectedHumans);
         }
         catch (Exception exception)
         {
@@ -283,6 +354,112 @@ internal static class ResumeCoordinator
         {
             _suppressCheckpointSave = false;
         }
+    }
+
+    private static List<PlayerResync> CaptureConnectedHumans(CheckpointSnapshot snapshot)
+    {
+        var savedHumans = snapshot.Players
+            .Where(player => !player.IsBot)
+            .Select(player => player.Lookup)
+            .ToHashSet();
+        var connected = new List<PlayerResync>();
+
+        foreach (var player in SNet.Slots.SlottedPlayers)
+        {
+            if (player == null || player.IsMaster || player.IsBot || !player.IsInSessionHub)
+                continue;
+
+            connected.Add(new PlayerResync(player.Lookup, player.NickName));
+            Log.Info(
+                $"Checkpoint player mapping: {player.NickName} ({player.Lookup}), " +
+                $"character {player.CharacterIndex}, saved state {(savedHumans.Contains(player.Lookup) ? "found" : "not found; vanilla defaults will apply")}, " +
+                $"fresh agent key {GetPlayerAgentKey(player)}.");
+        }
+
+        return connected;
+    }
+
+    private static void QueuePlayerResyncs(IEnumerable<PlayerResync> players)
+    {
+        ClearPlayerResyncs();
+        foreach (var player in players)
+            PlayerResyncQueue.Enqueue(player);
+
+        if (PlayerResyncQueue.Count == 0)
+            return;
+
+        _nextPlayerResyncTime = Time.realtimeSinceStartup + PlayerResyncDelaySeconds;
+        Log.Info($"Queued {PlayerResyncQueue.Count} connected human player(s) for fresh DropIn hard-sync.");
+    }
+
+    private static void StartPlayerHardSync(SNet_Player player)
+    {
+        _startSinglePlayerRecall ??= typeof(SNet_SyncManager)
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .FirstOrDefault(method =>
+            {
+                var parameters = method.GetParameters();
+                return method.Name == "StartRecall"
+                    && parameters.Length == 1
+                    && parameters[0].ParameterType == typeof(SNet_Player);
+            })
+            ?? throw new MissingMethodException(typeof(SNet_SyncManager).FullName, "StartRecall(SNet_Player)");
+
+        player.SyncProcessState = eSyncProcessState.InProcess_HardSync;
+        try
+        {
+            _startSinglePlayerRecall.Invoke(SNet.Sync, new object?[] { player });
+        }
+        catch
+        {
+            player.SyncProcessState = eSyncProcessState.ProcessDone;
+            throw;
+        }
+    }
+
+    private static SNet_Player? FindSlottedPlayer(ulong lookup)
+    {
+        foreach (var player in SNet.Slots.SlottedPlayers)
+        {
+            if (player != null && player.Lookup == lookup)
+                return player;
+        }
+        return null;
+    }
+
+    private static string GetPlayerAgentKey(SNet_Player player)
+    {
+        try
+        {
+            if (player.HasPlayerAgent)
+                return player.PlayerAgent.GetReplicator().Key.ToString();
+        }
+        catch
+        {
+            // Agent ownership changes briefly during recall.
+        }
+        return "none";
+    }
+
+    private static void ShowHostWarning(string message)
+    {
+        try
+        {
+            if (GuiManager.PlayerLayer != null && GuiManager.PlayerLayer.m_wardenIntel != null)
+                GuiManager.PlayerLayer.m_wardenIntel.ShowPrioritySubObjectiveMessage("", message, isAdditional: true);
+        }
+        catch (Exception exception)
+        {
+            Log.Warning($"Could not display checkpoint sync warning: {exception.Message}");
+        }
+    }
+
+    private static void ClearPlayerResyncs()
+    {
+        PlayerResyncQueue.Clear();
+        _activePlayerResync = null;
+        _activePlayerResyncDeadline = 0f;
+        _nextPlayerResyncTime = 0f;
     }
 
     private static bool ValidateBeforeGeneration(CheckpointSnapshot snapshot, pActiveExpedition package, ExpeditionInTierData expedition, out string reason)
@@ -402,5 +579,8 @@ internal static class ResumeCoordinator
         LastSelectionError = null;
         _hasFreshPackage = false;
         _requiredSlotCapacity = 4;
+        ClearPlayerResyncs();
     }
+
+    private sealed record PlayerResync(ulong Lookup, string DisplayName);
 }

@@ -34,6 +34,7 @@ internal sealed class PersistentCheckpointController : MonoBehaviour
         ResumeCoordinator.ObserveCurrentSlots();
         UpdateResumeButton();
         ResumeCoordinator.TryRecallPending();
+        ResumeCoordinator.UpdatePlayerResync();
     }
 
     internal static void QueueLoadoutUi(CM_PageLoadout page)
