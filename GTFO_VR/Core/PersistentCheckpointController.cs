@@ -97,7 +97,9 @@ internal sealed class PersistentCheckpointController : MonoBehaviour
         if (_resumeButton == null)
             return;
 
-        var visible = SNetwork.SNet.IsMaster && ResumeCoordinator.ShouldShowControl;
+        var visible = SNetwork.SNet.IsMaster
+            && GameStateManager.CurrentStateName == eGameStateName.Lobby
+            && ResumeCoordinator.ShouldShowControl;
         _resumeButton.SetVisible(visible);
         if (visible)
         {
