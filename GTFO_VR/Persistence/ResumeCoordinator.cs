@@ -3,6 +3,7 @@ using CellMenu;
 using GameData;
 using GTFO.PersistentCheckpoint.Core;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
+using Player;
 using SNetwork;
 using UnityEngine;
 
@@ -343,6 +344,7 @@ internal static class ResumeCoordinator
             Log.Info(
                 $"Recalled persistent checkpoint for {snapshot.ExpeditionKey} at " +
                 $"{Clock.ExpeditionProgressionTime:F2} seconds.");
+            LogPlayerResources("Restored checkpoint resources", connectedHumans);
             QueuePlayerResyncs(connectedHumans);
         }
         catch (Exception exception)
@@ -388,7 +390,9 @@ internal static class ResumeCoordinator
         if (PlayerResyncQueue.Count == 0)
             return;
 
-        _nextPlayerResyncTime = Time.realtimeSinceStartup + PlayerResyncDelaySeconds;
+        // Start on this same Unity update, before a connected client's fresh-lobby
+        // resource packets can overwrite the state restored on the host.
+        _nextPlayerResyncTime = Time.realtimeSinceStartup;
         Log.Info($"Queued {PlayerResyncQueue.Count} connected human player(s) for fresh DropIn hard-sync.");
     }
 
@@ -405,6 +409,7 @@ internal static class ResumeCoordinator
             })
             ?? throw new MissingMethodException(typeof(SNet_SyncManager).FullName, "StartRecall(SNet_Player)");
 
+        Log.Info($"DropIn capture resources for {player.NickName} ({player.Lookup}): {GetPlayerResourceSummary(player)}.");
         player.SyncProcessState = eSyncProcessState.InProcess_HardSync;
         try
         {
@@ -439,6 +444,37 @@ internal static class ResumeCoordinator
             // Agent ownership changes briefly during recall.
         }
         return "none";
+    }
+
+    private static void LogPlayerResources(string label, IEnumerable<PlayerResync> players)
+    {
+        foreach (var savedPlayer in players)
+        {
+            var player = FindSlottedPlayer(savedPlayer.Lookup);
+            if (player != null)
+                Log.Info($"{label} for {player.NickName} ({player.Lookup}): {GetPlayerResourceSummary(player)}.");
+        }
+    }
+
+    private static string GetPlayerResourceSummary(SNet_Player player)
+    {
+        try
+        {
+            if (!PlayerBackpackManager.TryGetBackpack(player, out var backpack))
+                return "backpack unavailable";
+
+            var ammo = backpack.AmmoStorage.GetStorageDataForCapture();
+            return
+                $"standard={ammo.standardAmmo.Get(500f):F1}, " +
+                $"special={ammo.specialAmmo.Get(500f):F1}, " +
+                $"tool={ammo.classAmmo.Get(500f):F1}, " +
+                $"resourcePack={ammo.resourcePackAmmo.Get(500f):F1}, " +
+                $"consumable={ammo.consumableAmmo.Get(500f):F1}";
+        }
+        catch (Exception exception)
+        {
+            return $"unavailable ({exception.Message})";
+        }
     }
 
     private static void ShowHostWarning(string message)
