@@ -22,9 +22,11 @@ internal static class ResumeCoordinator
     private static PlayerResync? _activePlayerResync;
     private static float _activePlayerResyncDeadline;
     private static float _nextPlayerResyncTime;
+    private static bool _activePlayerResyncSawNativeSync;
+    private static bool _activePlayerResyncTimedOut;
 
     private const float PlayerResyncDelaySeconds = 0.25f;
-    private const float PlayerResyncTimeoutSeconds = 45f;
+    private const float PlayerResyncTimeoutSeconds = 20f;
 
     internal static CheckpointSnapshot? ActiveSnapshot { get; private set; }
     internal static CheckpointSnapshot? PendingRecall { get; private set; }
@@ -182,6 +184,19 @@ internal static class ResumeCoordinator
         return true;
     }
 
+    internal static void OnPlayerEvent(SNet_Player player, SNet_PlayerEvent playerEvent)
+    {
+        if (playerEvent != SNet_PlayerEvent.PlayerIsSynced || _activePlayerResync == null)
+            return;
+        if (player == null || player.Lookup != _activePlayerResync.Lookup)
+            return;
+
+        _activePlayerResyncSawNativeSync = true;
+        Log.Info(
+            $"GTFO reported PlayerIsSynced for checkpoint hard-sync target " +
+            $"{player.NickName} ({player.Lookup}); {GetPlayerSyncSummary(player)}.");
+    }
+
     internal static void UpdatePlayerResync()
     {
         if (!SNet.IsMaster || GameStateManager.CurrentStateName != eGameStateName.InLevel)
@@ -197,27 +212,36 @@ internal static class ResumeCoordinator
             if (player == null || !player.IsInSessionHub)
             {
                 Log.Warning($"Skipping checkpoint hard-sync for {active.DisplayName} ({active.Lookup}): player disconnected.");
-                _activePlayerResync = null;
-                _nextPlayerResyncTime = Time.realtimeSinceStartup + PlayerResyncDelaySeconds;
+                FinishActivePlayerResync();
             }
-            else if (player.SyncProcessState == eSyncProcessState.ProcessDone
-                     && player.Session.mode == eReplicationMode.Playing
-                     && player.HasPlayerAgent)
+            else if (IsPlayerPlayingWithAgent(player)
+                     && (_activePlayerResyncSawNativeSync
+                         || player.SyncProcessState == eSyncProcessState.ProcessDone))
             {
                 Log.Info(
                     $"Checkpoint hard-sync completed for {player.NickName} ({player.Lookup}); " +
-                    $"agent key {GetPlayerAgentKey(player)}.");
-                _activePlayerResync = null;
-                _nextPlayerResyncTime = Time.realtimeSinceStartup + PlayerResyncDelaySeconds;
+                    $"{GetPlayerSyncSummary(player)}.");
+                FinishActivePlayerResync();
             }
-            else if (Time.realtimeSinceStartup >= _activePlayerResyncDeadline)
+            else if (!_activePlayerResyncTimedOut && Time.realtimeSinceStartup >= _activePlayerResyncDeadline)
             {
+                if (IsPlayerPlayingWithAgent(player))
+                {
+                    Log.Warning(
+                        $"Checkpoint hard-sync completion signals were stale or missed for " +
+                        $"{player.NickName} ({player.Lookup}); accepting Playing with a valid agent " +
+                        $"after {PlayerResyncTimeoutSeconds:F0} seconds. {GetPlayerSyncSummary(player)}.");
+                    FinishActivePlayerResync();
+                    return;
+                }
+
                 var message =
                     $"Checkpoint hard-sync timed out for {player.NickName} ({player.Lookup}). " +
-                    "That player should leave and rejoin.";
+                    $"Remaining queued players: {PlayerResyncQueue.Count}. {GetPlayerSyncSummary(player)}. " +
+                    "The queue will resume if that player finishes syncing or disconnects.";
                 Log.Error(message);
                 ShowHostWarning($"CHECKPOINT SYNC FAILED: {player.NickName}\nLEAVE AND REJOIN");
-                ClearPlayerResyncs();
+                _activePlayerResyncTimedOut = true;
                 return;
             }
         }
@@ -237,12 +261,14 @@ internal static class ResumeCoordinator
 
             try
             {
-                StartPlayerHardSync(player);
                 _activePlayerResync = pending;
                 _activePlayerResyncDeadline = Time.realtimeSinceStartup + PlayerResyncTimeoutSeconds;
+                _activePlayerResyncSawNativeSync = false;
+                _activePlayerResyncTimedOut = false;
+                StartPlayerHardSync(player);
                 Log.Info(
                     $"Started checkpoint hard-sync for {player.NickName} ({player.Lookup}); " +
-                    $"agent key {GetPlayerAgentKey(player)}.");
+                    $"{GetPlayerSyncSummary(player)}.");
             }
             catch (Exception exception)
             {
@@ -446,6 +472,40 @@ internal static class ResumeCoordinator
         return "none";
     }
 
+    private static string GetPlayerSyncSummary(SNet_Player player)
+    {
+        string mode;
+        string processState;
+        bool hasAgent;
+        try
+        {
+            mode = player.Session.mode.ToString();
+            processState = player.SyncProcessState.ToString();
+            hasAgent = player.HasPlayerAgent;
+        }
+        catch (Exception exception)
+        {
+            return $"sync state unavailable ({exception.Message}), native PlayerIsSynced={_activePlayerResyncSawNativeSync}";
+        }
+
+        return
+            $"mode={mode}, processState={processState}, hasAgent={hasAgent}, " +
+            $"agent key={GetPlayerAgentKey(player)}, native PlayerIsSynced={_activePlayerResyncSawNativeSync}";
+    }
+
+    private static bool IsPlayerPlayingWithAgent(SNet_Player player)
+    {
+        try
+        {
+            return player.Session.mode == eReplicationMode.Playing && player.HasPlayerAgent;
+        }
+        catch
+        {
+            // Player ownership changes briefly while the DropIn recall reconstructs the agent.
+            return false;
+        }
+    }
+
     private static void LogPlayerResources(string label, IEnumerable<PlayerResync> players)
     {
         foreach (var savedPlayer in players)
@@ -496,6 +556,17 @@ internal static class ResumeCoordinator
         _activePlayerResync = null;
         _activePlayerResyncDeadline = 0f;
         _nextPlayerResyncTime = 0f;
+        _activePlayerResyncSawNativeSync = false;
+        _activePlayerResyncTimedOut = false;
+    }
+
+    private static void FinishActivePlayerResync()
+    {
+        _activePlayerResync = null;
+        _activePlayerResyncDeadline = 0f;
+        _activePlayerResyncSawNativeSync = false;
+        _activePlayerResyncTimedOut = false;
+        _nextPlayerResyncTime = Time.realtimeSinceStartup + PlayerResyncDelaySeconds;
     }
 
     private static bool ValidateBeforeGeneration(CheckpointSnapshot snapshot, pActiveExpedition package, ExpeditionInTierData expedition, out string reason)

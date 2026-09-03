@@ -44,6 +44,15 @@ internal static class ExpeditionSuccessPatch
     }
 }
 
+[HarmonyPatch(typeof(SNet_GlobalManager), "OnPlayerEvent")]
+internal static class PlayerSyncEventPatch
+{
+    private static void Postfix(SNet_Player __0, SNet_PlayerEvent __1)
+    {
+        ResumeCoordinator.OnPlayerEvent(__0, __1);
+    }
+}
+
 [HarmonyPatch(typeof(CM_PageLoadout), nameof(CM_PageLoadout.Setup))]
 [HarmonyAfter(LobbyCompatibility.PluginGuid)]
 internal static class LoadoutUiPatch
