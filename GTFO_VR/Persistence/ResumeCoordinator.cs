@@ -563,8 +563,18 @@ internal static class ResumeCoordinator
     {
         try
         {
-            if (GuiManager.PlayerLayer != null && GuiManager.PlayerLayer.m_wardenIntel != null)
-                GuiManager.PlayerLayer.m_wardenIntel.ShowPrioritySubObjectiveMessage("", message, isAdditional: true);
+            var playerLayer = GuiManager.PlayerLayer;
+            if (playerLayer == null || playerLayer.m_wardenIntel == null)
+            {
+                Log.Warning("Could not display checkpoint warning: the player Warden HUD is unavailable.");
+                return;
+            }
+
+            // The sub-objective APIs only enqueue their message. At the start of a
+            // level that queue may not be serviced yet, and checkpoint recall resets
+            // it in WardenObjectiveManager.OnPrepareForRecall. ShowWardenIntel drives
+            // the HUD directly, so the warning is visible during the pre-recall delay.
+            playerLayer.ShowWardenIntel(message, delay: 0f, duration: 8f);
         }
         catch (Exception exception)
         {
