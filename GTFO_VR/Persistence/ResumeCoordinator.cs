@@ -24,7 +24,11 @@ internal static class ResumeCoordinator
     private static float _nextPlayerResyncTime;
     private static bool _activePlayerResyncSawNativeSync;
     private static bool _activePlayerResyncTimedOut;
+    private static bool _pendingRecallDelayStarted;
+    private static float _pendingRecallNotBefore;
 
+    private const float PendingRecallDelaySeconds = 3f;
+    private const float InitialPlayerResyncDelaySeconds = 1.5f;
     private const float PlayerResyncDelaySeconds = 0.25f;
     private const float PlayerResyncTimeoutSeconds = 20f;
 
@@ -95,6 +99,7 @@ internal static class ResumeCoordinator
 
         if (ResumeSelected && ActiveSnapshot != null)
         {
+            ResetPendingRecallDelay();
             PendingRecall = ActiveSnapshot;
             Log.Info($"Expedition launch will recall checkpoint for {ActiveExpeditionKey}.");
             return;
@@ -176,10 +181,26 @@ internal static class ResumeCoordinator
             return false;
         if (SNet.Capture.IsCapturing || SNet.Capture.IsRecalling || CheckpointManager.Current == null)
             return false;
-        if (!GameStateManager.IsEveryoneInState(eGameStateName.InLevel, includeMaster: true, skipPlayersInLobbyGameState: true))
+
+        if (!_pendingRecallDelayStarted)
+        {
+            if (!GameStateManager.IsEveryoneInState(eGameStateName.InLevel, includeMaster: true, skipPlayersInLobbyGameState: true))
+                return false;
+
+            _pendingRecallDelayStarted = true;
+            _pendingRecallNotBefore = Time.realtimeSinceStartup + PendingRecallDelaySeconds;
+            ShowHostWarning("TEMPORAL INSTABILITY DETECTED\nRESTORING TIMELINE...\nEL PSY KONGROO");
+            Log.Info(
+                $"All players reached InLevel; persistent checkpoint recall will begin in " +
+                $"{PendingRecallDelaySeconds:F1} seconds.");
+            return false;
+        }
+
+        if (Time.realtimeSinceStartup < _pendingRecallNotBefore)
             return false;
 
         PendingRecall = null;
+        ResetPendingRecallDelay();
         RestoreAndRecall(snapshot);
         return true;
     }
@@ -286,6 +307,7 @@ internal static class ResumeCoordinator
             return;
 
         PendingRecall = null;
+        ResetPendingRecallDelay();
         ActiveSnapshot = null;
         ResumeSelected = false;
         ClearPlayerResyncs();
@@ -416,10 +438,10 @@ internal static class ResumeCoordinator
         if (PlayerResyncQueue.Count == 0)
             return;
 
-        // Start on this same Unity update, before a connected client's fresh-lobby
-        // resource packets can overwrite the state restored on the host.
-        _nextPlayerResyncTime = Time.realtimeSinceStartup;
-        Log.Info($"Queued {PlayerResyncQueue.Count} connected human player(s) for fresh DropIn hard-sync.");
+        _nextPlayerResyncTime = Time.realtimeSinceStartup + InitialPlayerResyncDelaySeconds;
+        Log.Info(
+            $"Queued {PlayerResyncQueue.Count} connected human player(s) for fresh DropIn hard-sync; " +
+            $"the first sync will begin in {InitialPlayerResyncDelaySeconds:F1} seconds.");
     }
 
     private static void StartPlayerHardSync(SNet_Player player)
@@ -681,12 +703,19 @@ internal static class ResumeCoordinator
     {
         ActiveSnapshot = null;
         PendingRecall = null;
+        ResetPendingRecallDelay();
         ActiveExpeditionKey = string.Empty;
         ResumeSelected = false;
         LastSelectionError = null;
         _hasFreshPackage = false;
         _requiredSlotCapacity = 4;
         ClearPlayerResyncs();
+    }
+
+    private static void ResetPendingRecallDelay()
+    {
+        _pendingRecallDelayStarted = false;
+        _pendingRecallNotBefore = 0f;
     }
 
     private sealed record PlayerResync(ulong Lookup, string DisplayName);
