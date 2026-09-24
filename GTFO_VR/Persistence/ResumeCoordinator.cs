@@ -360,10 +360,10 @@ internal static class ResumeCoordinator
             CheckpointManager.ReloadCheckpoint();
             if (!SNet.Sync.SessionCommand(eSessionCommandType.ForceStartPlaying))
                 Log.Warning("GTFO rejected ForceStartPlaying before canonical checkpoint recall; continuing with recall.");
-            SNet.Sync.StartRecallCheckpointWithAllSyncedPlayers();
+            StartCanonicalAllPlayerRecall();
             Log.Info(
-                $"Captured canonical checkpoint for {snapshot.ExpeditionKey} and invoked " +
-                "GTFO's all-player checkpoint recall protocol.");
+                $"Captured and recalled canonical checkpoint for {snapshot.ExpeditionKey} " +
+                "with GTFO's explicit all-player checkpoint protocol.");
         }
         catch (Exception exception)
         {
@@ -549,6 +549,34 @@ internal static class ResumeCoordinator
             player.SyncProcessState = eSyncProcessState.ProcessDone;
             throw;
         }
+    }
+
+    private static void StartCanonicalAllPlayerRecall()
+    {
+        // StartRecallCheckpointWithAllSyncedPlayers is inert in the current game
+        // build while the session is already InLevel. Perform the operations from
+        // GTFO's implementation explicitly so the host and every synced client
+        // receive and recall the same freshly captured buffer.
+        SNet.Capture.InitCheckpointRecall();
+
+        var remotePlayerCount = 0;
+        foreach (var player in SNet.Slots.PlayersSynchedWithGame)
+        {
+            if (player == null || player.IsMaster)
+                continue;
+
+            SNet.Sync.SendPlayerData_Session_SyncAllTo(player);
+            remotePlayerCount++;
+        }
+
+        SNet.Capture.SendBuffer(eBufferType.Checkpoint);
+        SNet.Capture.SendBufferCommand(
+            eBufferType.Checkpoint,
+            eBufferOperationType.RecallGameState,
+            null,
+            0);
+        SNet.Capture.RecallGameState(eBufferType.Checkpoint);
+        Log.Info($"Explicit canonical checkpoint recall sent to {remotePlayerCount} synced remote player(s).");
     }
 
     private static void BeginBridgeRecall(CheckpointSnapshot snapshot)
