@@ -352,7 +352,19 @@ internal static class ResumeCoordinator
             // The sequential DropIn recalls have now rebuilt every connected client
             // against the host's restored world. Capture that healthy current-session
             // state, then let GTFO distribute and recall it as a normal checkpoint.
-            SNet.Capture.CaptureGameState(eBufferType.Checkpoint);
+            // This is a transient bridge checkpoint: do not replace the persistent
+            // checkpoint the player actually reached during play.
+            var wasSuppressingCheckpointSave = _suppressCheckpointSave;
+            try
+            {
+                _suppressCheckpointSave = true;
+                SNet.Capture.CaptureGameState(eBufferType.Checkpoint);
+            }
+            finally
+            {
+                _suppressCheckpointSave = wasSuppressingCheckpointSave;
+            }
+
             var canonical = SNet.Capture.m_buffers[(int)eBufferType.Checkpoint];
             if (canonical == null || !canonical.isValid)
                 throw new InvalidOperationException("canonical checkpoint capture was invalid");
