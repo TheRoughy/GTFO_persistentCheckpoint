@@ -18,19 +18,25 @@ internal static class ResumeCoordinator
     private static bool _applyingPackage;
     private static bool _suppressCheckpointSave;
     private static int _requiredSlotCapacity = 4;
+    private static bool _pendingRecallDelayStarted;
+    private static float _pendingRecallNotBefore;
     private static readonly Queue<PlayerResync> PlayerResyncQueue = new();
     private static PlayerResync? _activePlayerResync;
+    private static CheckpointSnapshot? _playerResyncSnapshot;
     private static float _activePlayerResyncDeadline;
     private static float _nextPlayerResyncTime;
     private static bool _activePlayerResyncSawNativeSync;
     private static bool _activePlayerResyncTimedOut;
-    private static bool _pendingRecallDelayStarted;
-    private static float _pendingRecallNotBefore;
+    private static CheckpointSnapshot? _bridgeSnapshot;
+    private static float _bridgeNotBefore;
+    private static float _bridgeDeadline;
 
     private const float PendingRecallDelaySeconds = 3f;
     private const float InitialPlayerResyncDelaySeconds = 1.5f;
     private const float PlayerResyncDelaySeconds = 0.25f;
     private const float PlayerResyncTimeoutSeconds = 20f;
+    private const float BridgeStabilizationSeconds = 2f;
+    private const float BridgeReadyTimeoutSeconds = 20f;
 
     internal static CheckpointSnapshot? ActiveSnapshot { get; private set; }
     internal static CheckpointSnapshot? PendingRecall { get; private set; }
@@ -139,7 +145,7 @@ internal static class ResumeCoordinator
             {
                 if (player == null)
                     continue;
-                players.Add(new CapturedPlayer(player.Lookup, player.CharacterIndex, player.IsBot));
+                players.Add(CapturePlayerState(player));
                 requiredCapacity = Math.Max(requiredCapacity, player.CharacterIndex + 1);
             }
 
@@ -256,11 +262,10 @@ internal static class ResumeCoordinator
                     return;
                 }
 
-                var message =
+                Log.Error(
                     $"Checkpoint hard-sync timed out for {player.NickName} ({player.Lookup}). " +
                     $"Remaining queued players: {PlayerResyncQueue.Count}. {GetPlayerSyncSummary(player)}. " +
-                    "The queue will resume if that player finishes syncing or disconnects.";
-                Log.Error(message);
+                    "The canonical checkpoint will not be created; that player should leave and rejoin.");
                 ShowHostWarning($"CHECKPOINT SYNC FAILED: {player.NickName}\nLEAVE AND REJOIN");
                 _activePlayerResyncTimedOut = true;
                 return;
@@ -299,6 +304,76 @@ internal static class ResumeCoordinator
             }
             return;
         }
+
+        if (_playerResyncSnapshot != null)
+        {
+            var snapshot = _playerResyncSnapshot;
+            ClearPlayerResyncs();
+            BeginBridgeRecall(snapshot);
+        }
+    }
+
+    internal static void UpdateBridgeRecall()
+    {
+        var snapshot = _bridgeSnapshot;
+        if (snapshot == null)
+            return;
+
+        if (!SNet.IsMaster || GameStateManager.CurrentStateName != eGameStateName.InLevel)
+        {
+            ClearBridgeRecall();
+            return;
+        }
+        if (Time.realtimeSinceStartup < _bridgeNotBefore
+            || SNet.Capture.IsCapturing
+            || SNet.Capture.IsRecalling)
+            return;
+
+        var unreadyPlayers = GetUnreadyConnectedPlayers();
+        if (unreadyPlayers.Count > 0 && Time.realtimeSinceStartup < _bridgeDeadline)
+            return;
+
+        if (unreadyPlayers.Count > 0)
+        {
+            var names = string.Join(", ", unreadyPlayers.Select(player => player.NickName));
+            Log.Error(
+                $"Timed out waiting for checkpoint bridge players after {BridgeReadyTimeoutSeconds:F0} seconds: {names}. " +
+                "The canonical checkpoint recall was cancelled to avoid splitting the session again.");
+            ShowHostWarning($"CHECKPOINT SYNC INCOMPLETE: {names}\nLEAVE AND REJOIN");
+            ClearBridgeRecall();
+            return;
+        }
+
+        try
+        {
+            ApplySavedPlayerResources(snapshot);
+            LogCurrentPlayerResources("Checkpoint bridge resources");
+
+            // The sequential DropIn recalls have now rebuilt every connected client
+            // against the host's restored world. Capture that healthy current-session
+            // state, then let GTFO distribute and recall it as a normal checkpoint.
+            SNet.Capture.CaptureGameState(eBufferType.Checkpoint);
+            var canonical = SNet.Capture.m_buffers[(int)eBufferType.Checkpoint];
+            if (canonical == null || !canonical.isValid)
+                throw new InvalidOperationException("canonical checkpoint capture was invalid");
+
+            CheckpointManager.ReloadCheckpoint();
+            if (!SNet.Sync.SessionCommand(eSessionCommandType.ForceStartPlaying))
+                Log.Warning("GTFO rejected ForceStartPlaying before canonical checkpoint recall; continuing with recall.");
+            SNet.Sync.StartRecallCheckpointWithAllSyncedPlayers();
+            Log.Info(
+                $"Captured canonical checkpoint for {snapshot.ExpeditionKey} and invoked " +
+                "GTFO's all-player checkpoint recall protocol.");
+        }
+        catch (Exception exception)
+        {
+            Log.Error($"Canonical checkpoint bridge failed: {exception}");
+            ShowHostWarning("CHECKPOINT SYNC FAILED\nLEAVE AND REJOIN");
+        }
+        finally
+        {
+            ClearBridgeRecall();
+        }
     }
 
     internal static void ClearOnSuccess()
@@ -311,6 +386,7 @@ internal static class ResumeCoordinator
         ActiveSnapshot = null;
         ResumeSelected = false;
         ClearPlayerResyncs();
+        ClearBridgeRecall();
         CheckpointStore.EnqueueDelete(ActiveExpeditionKey);
         Log.Info($"Expedition succeeded; deleted checkpoint for {ActiveExpeditionKey}.");
     }
@@ -392,8 +468,7 @@ internal static class ResumeCoordinator
             Log.Info(
                 $"Recalled persistent checkpoint for {snapshot.ExpeditionKey} at " +
                 $"{Clock.ExpeditionProgressionTime:F2} seconds.");
-            LogPlayerResources("Restored checkpoint resources", connectedHumans);
-            QueuePlayerResyncs(connectedHumans);
+            QueuePlayerResyncs(connectedHumans, snapshot);
         }
         catch (Exception exception)
         {
@@ -412,8 +487,8 @@ internal static class ResumeCoordinator
             .Where(player => !player.IsBot)
             .Select(player => player.Lookup)
             .ToHashSet();
-        var connected = new List<PlayerResync>();
 
+        var connected = new List<PlayerResync>();
         foreach (var player in SNet.Slots.SlottedPlayers)
         {
             if (player == null || player.IsMaster || player.IsBot || !player.IsInSessionHub)
@@ -429,14 +504,20 @@ internal static class ResumeCoordinator
         return connected;
     }
 
-    private static void QueuePlayerResyncs(IEnumerable<PlayerResync> players)
+    private static void QueuePlayerResyncs(IEnumerable<PlayerResync> players, CheckpointSnapshot snapshot)
     {
         ClearPlayerResyncs();
+        _playerResyncSnapshot = snapshot;
         foreach (var player in players)
             PlayerResyncQueue.Enqueue(player);
 
         if (PlayerResyncQueue.Count == 0)
+        {
+            var bridgeSnapshot = _playerResyncSnapshot;
+            ClearPlayerResyncs();
+            BeginBridgeRecall(bridgeSnapshot!);
             return;
+        }
 
         _nextPlayerResyncTime = Time.realtimeSinceStartup + InitialPlayerResyncDelaySeconds;
         Log.Info(
@@ -470,6 +551,135 @@ internal static class ResumeCoordinator
         }
     }
 
+    private static void BeginBridgeRecall(CheckpointSnapshot snapshot)
+    {
+        _bridgeSnapshot = snapshot;
+        _bridgeNotBefore = Time.realtimeSinceStartup + BridgeStabilizationSeconds;
+        _bridgeDeadline = Time.realtimeSinceStartup + BridgeReadyTimeoutSeconds;
+        Log.Info(
+            $"All checkpoint hard-syncs completed; canonical all-player recall will begin after " +
+            $"at least {BridgeStabilizationSeconds:F1} seconds once current players are capture-ready.");
+    }
+
+    private static List<SNet_Player> GetUnreadyConnectedPlayers()
+    {
+        var unready = new List<SNet_Player>();
+        foreach (var player in SNet.Slots.SlottedPlayers)
+        {
+            if (player == null || (!player.IsBot && !player.IsInSessionHub))
+                continue;
+
+            try
+            {
+                var playing = player.IsBot || player.Session.mode == eReplicationMode.Playing;
+                if (!playing
+                    || player.IsOutOfSync
+                    || !player.HasPlayerAgent
+                    || !PlayerBackpackManager.TryGetBackpack(player, out _))
+                    unready.Add(player);
+            }
+            catch
+            {
+                unready.Add(player);
+            }
+        }
+
+        return unready;
+    }
+
+    private static void ApplySavedPlayerResources(CheckpointSnapshot snapshot)
+    {
+        foreach (var saved in snapshot.Players)
+        {
+            if (!saved.HasResources)
+                continue;
+
+            var player = FindSlottedPlayer(saved.Lookup);
+            if (player == null || !player.HasPlayerAgent
+                || !PlayerBackpackManager.TryGetBackpack(player, out var backpack))
+            {
+                Log.Warning($"Could not apply saved resources for player {saved.Lookup}: current agent or backpack unavailable.");
+                continue;
+            }
+
+            try
+            {
+                var agent = player.PlayerAgent.TryCast<PlayerAgent>()
+                    ?? throw new InvalidOperationException("player agent could not be cast to PlayerAgent");
+                agent.Damage.Health = Mathf.Clamp01(saved.HealthRel) * agent.Damage.HealthMax;
+                agent.Damage.Infection = Mathf.Clamp01(saved.Infection);
+
+                var ammo = CreateAmmoDataForCapture(player, backpack, saved);
+                backpack.AmmoStorage.SetStorageData(ref ammo);
+                Log.Info(
+                    $"Applied saved resources for {player.NickName} ({player.Lookup}): " +
+                    $"health={saved.HealthRel:P0}, infection={saved.Infection:P0}, {GetPlayerResourceSummary(player)}.");
+            }
+            catch (Exception exception)
+            {
+                Log.Warning($"Could not apply saved resources for {player.NickName} ({player.Lookup}): {exception.Message}");
+            }
+        }
+    }
+
+    private static pAmmoStorageData CreateAmmoDataForCapture(
+        SNet_Player player,
+        PlayerBackpack backpack,
+        CapturedPlayer saved)
+    {
+        var standard = saved.StandardAmmo;
+        var special = saved.SpecialAmmo;
+
+        // Host-local and bot captures add loaded magazines to AmmoInPack.
+        // Remote human captures already treat the host's value as aggregate ammo.
+        if (backpack.IsLocal || (SNet.IsMaster && player.IsBot))
+        {
+            standard -= backpack.AmmoStorage.GetClipAmmoFromSlot(InventorySlot.GearStandard)
+                * backpack.AmmoStorage.StandardAmmo.CostOfBullet;
+            special -= backpack.AmmoStorage.GetClipAmmoFromSlot(InventorySlot.GearSpecial)
+                * backpack.AmmoStorage.SpecialAmmo.CostOfBullet;
+        }
+
+        var data = default(pAmmoStorageData);
+        data.PlayerLookup = player.Lookup;
+        data.standardAmmo.Set(Mathf.Max(0f, standard), 500f);
+        data.specialAmmo.Set(Mathf.Max(0f, special), 500f);
+        data.classAmmo.Set(Mathf.Max(0f, saved.ClassAmmo), 500f);
+        data.resourcePackAmmo.Set(Mathf.Max(0f, saved.ResourcePackAmmo), 500f);
+        data.consumableAmmo.Set(Mathf.Max(0f, saved.ConsumableAmmo), 500f);
+        return data;
+    }
+
+    private static CapturedPlayer CapturePlayerState(SNet_Player player)
+    {
+        try
+        {
+            if (!player.HasPlayerAgent || !PlayerBackpackManager.TryGetBackpack(player, out var backpack))
+                return new CapturedPlayer(player.Lookup, player.CharacterIndex, player.IsBot);
+
+            var agent = player.PlayerAgent.TryCast<PlayerAgent>()
+                ?? throw new InvalidOperationException("player agent could not be cast to PlayerAgent");
+            var ammo = backpack.AmmoStorage.GetStorageDataForCapture();
+            return new CapturedPlayer(
+                player.Lookup,
+                player.CharacterIndex,
+                player.IsBot,
+                true,
+                agent.Damage.GetHealthRel(),
+                agent.Damage.Infection,
+                ammo.standardAmmo.Get(500f),
+                ammo.specialAmmo.Get(500f),
+                ammo.classAmmo.Get(500f),
+                ammo.resourcePackAmmo.Get(500f),
+                ammo.consumableAmmo.Get(500f));
+        }
+        catch (Exception exception)
+        {
+            Log.Warning($"Could not capture resources for {player.NickName} ({player.Lookup}): {exception.Message}");
+            return new CapturedPlayer(player.Lookup, player.CharacterIndex, player.IsBot);
+        }
+    }
+
     private static SNet_Player? FindSlottedPlayer(ulong lookup)
     {
         foreach (var player in SNet.Slots.SlottedPlayers)
@@ -496,23 +706,17 @@ internal static class ResumeCoordinator
 
     private static string GetPlayerSyncSummary(SNet_Player player)
     {
-        string mode;
-        string processState;
-        bool hasAgent;
         try
         {
-            mode = player.Session.mode.ToString();
-            processState = player.SyncProcessState.ToString();
-            hasAgent = player.HasPlayerAgent;
+            return
+                $"mode={player.Session.mode}, processState={player.SyncProcessState}, " +
+                $"hasAgent={player.HasPlayerAgent}, agent key={GetPlayerAgentKey(player)}, " +
+                $"native PlayerIsSynced={_activePlayerResyncSawNativeSync}";
         }
         catch (Exception exception)
         {
             return $"sync state unavailable ({exception.Message}), native PlayerIsSynced={_activePlayerResyncSawNativeSync}";
         }
-
-        return
-            $"mode={mode}, processState={processState}, hasAgent={hasAgent}, " +
-            $"agent key={GetPlayerAgentKey(player)}, native PlayerIsSynced={_activePlayerResyncSawNativeSync}";
     }
 
     private static bool IsPlayerPlayingWithAgent(SNet_Player player)
@@ -523,16 +727,14 @@ internal static class ResumeCoordinator
         }
         catch
         {
-            // Player ownership changes briefly while the DropIn recall reconstructs the agent.
             return false;
         }
     }
 
-    private static void LogPlayerResources(string label, IEnumerable<PlayerResync> players)
+    private static void LogCurrentPlayerResources(string label)
     {
-        foreach (var savedPlayer in players)
+        foreach (var player in SNet.Slots.SlottedPlayers)
         {
-            var player = FindSlottedPlayer(savedPlayer.Lookup);
             if (player != null)
                 Log.Info($"{label} for {player.NickName} ({player.Lookup}): {GetPlayerResourceSummary(player)}.");
         }
@@ -582,10 +784,18 @@ internal static class ResumeCoordinator
         }
     }
 
+    private static void ClearBridgeRecall()
+    {
+        _bridgeSnapshot = null;
+        _bridgeNotBefore = 0f;
+        _bridgeDeadline = 0f;
+    }
+
     private static void ClearPlayerResyncs()
     {
         PlayerResyncQueue.Clear();
         _activePlayerResync = null;
+        _playerResyncSnapshot = null;
         _activePlayerResyncDeadline = 0f;
         _nextPlayerResyncTime = 0f;
         _activePlayerResyncSawNativeSync = false;
@@ -720,6 +930,7 @@ internal static class ResumeCoordinator
         _hasFreshPackage = false;
         _requiredSlotCapacity = 4;
         ClearPlayerResyncs();
+        ClearBridgeRecall();
     }
 
     private static void ResetPendingRecallDelay()

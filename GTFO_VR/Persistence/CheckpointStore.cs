@@ -8,7 +8,8 @@ namespace GTFO.PersistentCheckpoint.Persistence;
 internal static class CheckpointStore
 {
     private static readonly byte[] Magic = Encoding.ASCII.GetBytes("GTFOCP01");
-    private const int FormatVersion = 1;
+    private const int FormatVersion = 2;
+    private const int MinimumFormatVersion = 1;
     private const int HashLength = 32;
     private const int MaxStringBytes = 2048;
     private const int MaxPasses = 32;
@@ -47,10 +48,11 @@ internal static class CheckpointStore
             using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: false);
             if (!reader.ReadBytes(Magic.Length).SequenceEqual(Magic))
                 return new SnapshotLoadResult(null, "checkpoint magic is invalid");
-            if (reader.ReadInt32() != FormatVersion)
+            var formatVersion = reader.ReadInt32();
+            if (formatVersion < MinimumFormatVersion || formatVersion > FormatVersion)
                 return new SnapshotLoadResult(null, "checkpoint format is unsupported");
 
-            var snapshot = ReadSnapshot(reader);
+            var snapshot = ReadSnapshot(reader, formatVersion);
             if (stream.Position != stream.Length)
                 return new SnapshotLoadResult(null, "checkpoint contains trailing payload data");
             if (!string.Equals(snapshot.ExpeditionKey, expeditionKey, StringComparison.Ordinal))
@@ -168,6 +170,14 @@ internal static class CheckpointStore
             writer.Write(player.Lookup);
             writer.Write(player.CharacterIndex);
             writer.Write(player.IsBot);
+            writer.Write(player.HasResources);
+            writer.Write(player.HealthRel);
+            writer.Write(player.Infection);
+            writer.Write(player.StandardAmmo);
+            writer.Write(player.SpecialAmmo);
+            writer.Write(player.ClassAmmo);
+            writer.Write(player.ResourcePackAmmo);
+            writer.Write(player.ConsumableAmmo);
         }
 
         writer.Write(snapshot.Passes.Count);
@@ -184,7 +194,7 @@ internal static class CheckpointStore
         }
     }
 
-    private static CheckpointSnapshot ReadSnapshot(BinaryReader reader)
+    private static CheckpointSnapshot ReadSnapshot(BinaryReader reader, int formatVersion)
     {
         var buildRevision = reader.ReadInt32();
         var expeditionKey = ReadString(reader);
@@ -204,7 +214,25 @@ internal static class CheckpointStore
         var playerCount = ReadBoundedCount(reader, 256, "player");
         var players = new List<CapturedPlayer>(playerCount);
         for (var i = 0; i < playerCount; i++)
-            players.Add(new CapturedPlayer(reader.ReadUInt64(), reader.ReadInt32(), reader.ReadBoolean()));
+        {
+            var lookup = reader.ReadUInt64();
+            var characterIndex = reader.ReadInt32();
+            var isBot = reader.ReadBoolean();
+            players.Add(formatVersion >= 2
+                ? new CapturedPlayer(
+                    lookup,
+                    characterIndex,
+                    isBot,
+                    reader.ReadBoolean(),
+                    reader.ReadSingle(),
+                    reader.ReadSingle(),
+                    reader.ReadSingle(),
+                    reader.ReadSingle(),
+                    reader.ReadSingle(),
+                    reader.ReadSingle(),
+                    reader.ReadSingle())
+                : new CapturedPlayer(lookup, characterIndex, isBot));
+        }
 
         var passCount = ReadBoundedCount(reader, MaxPasses, "capture pass");
         var passes = new List<List<byte[]>>(passCount);

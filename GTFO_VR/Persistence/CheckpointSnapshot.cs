@@ -20,7 +20,18 @@ internal sealed class CheckpointSnapshot
     internal List<List<byte[]>> Passes { get; init; } = new();
 }
 
-internal readonly record struct CapturedPlayer(ulong Lookup, int CharacterIndex, bool IsBot);
+internal readonly record struct CapturedPlayer(
+    ulong Lookup,
+    int CharacterIndex,
+    bool IsBot,
+    bool HasResources = false,
+    float HealthRel = 0f,
+    float Infection = 0f,
+    float StandardAmmo = 0f,
+    float SpecialAmmo = 0f,
+    float ClassAmmo = 0f,
+    float ResourcePackAmmo = 0f,
+    float ConsumableAmmo = 0f);
 
 internal readonly record struct SnapshotLoadResult(CheckpointSnapshot? Snapshot, string? Error)
 {
