@@ -1,10 +1,13 @@
 namespace GTFO.PersistentCheckpoint.Persistence;
 
-internal sealed class CheckpointSnapshot
+internal sealed record CheckpointSnapshot
 {
     internal int BuildRevision { get; init; }
     internal string ExpeditionKey { get; init; } = string.Empty;
     internal string RundownKey { get; init; } = string.Empty;
+    internal string RundownName { get; init; } = string.Empty;
+    internal string ExpeditionName { get; init; } = string.Empty;
+    internal CheckpointIdentity Identity => new(ExpeditionKey, RundownName, ExpeditionName);
     internal int Tier { get; init; }
     internal int ExpeditionIndex { get; init; }
     internal int HostSeed { get; init; }

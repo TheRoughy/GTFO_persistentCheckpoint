@@ -4,7 +4,8 @@ A host-side BepInEx IL2CPP plugin that preserves GTFO's latest checkpoint across
 
 ## Behavior
 
-- The host's latest native checkpoint is saved separately for each rundown expedition.
+- The host's latest native checkpoint is saved separately for each rundown expedition. Filenames hash its existing expedition identifier, rundown title and expedition name, so custom rundowns reusing numeric IDs no longer share a save when their names differ. Rundown titles use their underlying literal text or localization ID, not the current display language (with the internal rundown block name as a fallback when no title exists).
+- Expeditions marked `SkipLobby`, including the Tutorial, do not save or resume persistent checkpoints.
 - When a compatible save exists, the loadout lobby shows a checked `RESUME CHECKPOINT` control beside the Drop button.
 - Unchecking it and starting the expedition deletes the old save and starts fresh.
 - Completing an expedition deletes its save. Failing, aborting, or quitting keeps it.
@@ -20,6 +21,10 @@ BepInEx/config/GTFO_PersistentCheckpoint/checkpoints/
 ```
 
 Saves are tied to the GTFO build revision and expedition checksum. Incompatible or corrupt saves are not recalled.
+
+Only named format-3 saves are supported. There is no legacy importer or fallback to ID-only saves. Files in backup subdirectories are not loaded or deleted by the plugin.
+
+This name-based identity is not a full content fingerprint. Mod updates retaining the same names still rely on GTFO's checksum checks.
 
 ## LobbyExpansion
 

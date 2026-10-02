@@ -32,6 +32,7 @@ internal static class ResumeCoordinator
     private static CheckpointSnapshot? _bridgeSnapshot;
     private static float _bridgeNotBefore;
     private static float _bridgeDeadline;
+    private static CheckpointIdentity? _activeIdentity;
 
     private const float PendingRecallDelaySeconds = 3f;
     private const float DoorPreparationDelaySeconds = 1f;
@@ -67,10 +68,17 @@ internal static class ResumeCoordinator
 
         var key = GetExpeditionKey(package);
         ActiveExpeditionKey = key;
+        if (!TryGetIdentity(package, expedition, out var identity, out var identityError))
+        {
+            LastSelectionError = identityError;
+            Log.Warning($"Checkpoint identity for {key} is unavailable: {identityError}");
+            return;
+        }
+        _activeIdentity = identity;
         _freshPackage = ClonePackage(package);
         _hasFreshPackage = true;
 
-        var load = CheckpointStore.TryLoad(key);
+        var load = CheckpointStore.TryLoad(identity);
         if (!load.Success)
         {
             LastSelectionError = load.Error;
@@ -114,7 +122,7 @@ internal static class ResumeCoordinator
     internal static void OnStartLevelResult(bool started)
     {
         if (!started || !SNet.IsMaster || SkipUnsupportedActiveExpedition()
-            || string.IsNullOrEmpty(ActiveExpeditionKey))
+            || string.IsNullOrEmpty(ActiveExpeditionKey) || !_activeIdentity.HasValue)
             return;
 
         if (ResumeSelected && ActiveSnapshot != null)
@@ -125,7 +133,7 @@ internal static class ResumeCoordinator
             return;
         }
 
-        CheckpointStore.EnqueueDelete(ActiveExpeditionKey);
+        CheckpointStore.EnqueueDelete(_activeIdentity.Value);
         ActiveSnapshot = null;
         Log.Info($"Fresh expedition selected; deleted the old checkpoint for {ActiveExpeditionKey}.");
     }
@@ -142,6 +150,8 @@ internal static class ResumeCoordinator
 
             var package = RundownManager.GetActiveExpeditionData();
             var key = GetExpeditionKey(package);
+            if (!TryGetIdentity(package, RundownManager.ActiveExpedition, out var identity, out var identityError))
+                throw new InvalidOperationException(identityError);
             var buffer = SNet.Capture.m_buffers[(int)eBufferType.Checkpoint];
             if (buffer == null || !buffer.isValid)
                 return;
@@ -171,6 +181,8 @@ internal static class ResumeCoordinator
                 BuildRevision = CellBuildData.GetRevision(),
                 ExpeditionKey = key,
                 RundownKey = package.rundownKey.data,
+                RundownName = identity.RundownName,
+                ExpeditionName = identity.ExpeditionName,
                 Tier = (int)package.tier,
                 ExpeditionIndex = package.expeditionIndex,
                 HostSeed = package.hostIDSeed,
@@ -187,6 +199,7 @@ internal static class ResumeCoordinator
             };
 
             ActiveExpeditionKey = key;
+            _activeIdentity = identity;
             ActiveSnapshot = snapshot;
             ResumeSelected = true;
             CheckpointStore.EnqueueSave(snapshot);
@@ -469,7 +482,8 @@ internal static class ResumeCoordinator
         ResumeSelected = false;
         ClearPlayerResyncs();
         ClearBridgeRecall();
-        CheckpointStore.EnqueueDelete(ActiveExpeditionKey);
+        if (_activeIdentity.HasValue)
+            CheckpointStore.EnqueueDelete(_activeIdentity.Value);
         Log.Info($"Expedition succeeded; deleted checkpoint for {ActiveExpeditionKey}.");
     }
 
@@ -559,6 +573,12 @@ internal static class ResumeCoordinator
 
     private static void ValidateGeneratedLevel(CheckpointSnapshot snapshot)
     {
+        var package = RundownManager.GetActiveExpeditionData();
+        if (!TryGetIdentity(package, RundownManager.ActiveExpedition, out var identity, out var identityError))
+            throw new InvalidOperationException(identityError);
+        if (snapshot.Identity != identity)
+            throw new InvalidOperationException("Current mission names do not match the saved checkpoint.");
+
         var currentChecksum = (ulong)SNet.LocalPlayer.Session.levelChecksum;
         if (currentChecksum != snapshot.LevelChecksum)
             throw new InvalidOperationException($"Generated level checksum {currentChecksum} does not match checkpoint {snapshot.LevelChecksum}.");
@@ -1029,6 +1049,52 @@ internal static class ResumeCoordinator
     private static string GetExpeditionKey(pActiveExpedition package) =>
         $"{package.rundownKey.data}_{package.tier}_{package.expeditionIndex}";
 
+    private static bool TryGetIdentity(pActiveExpedition package, ExpeditionInTierData expedition,
+        out CheckpointIdentity identity, out string reason)
+    {
+        identity = default;
+        try
+        {
+            RundownDataBlock rundown;
+            if (package.rundownType == eRundownKey.Local)
+            {
+                // Use the incoming package, not Global.RundownIdToLoad: the
+                // selection prefix can run before the active rundown changes.
+                var key = package.rundownKey.data;
+                if (key == null || !key.StartsWith("Local_", StringComparison.Ordinal)
+                    || !uint.TryParse(key.AsSpan(6), System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out var id))
+                    throw new InvalidOperationException("local rundown key is invalid");
+                rundown = GameDataBlockBase<RundownDataBlock>.GetBlock(id);
+                if (rundown == null || RundownManager.GetLocalRundownKey(rundown) != key)
+                    throw new InvalidOperationException("local rundown data is unavailable");
+            }
+            else if (!RundownManager.TryGetRundownData(package.rundownType, out rundown) || rundown == null)
+            {
+                throw new InvalidOperationException("rundown data is unavailable");
+            }
+
+            var title = rundown.StorytellingData.Title;
+            // Never hash translated display text: switching language must not
+            // change filenames. Prefixes distinguish literals from text IDs.
+            var rundownName = !string.IsNullOrWhiteSpace(title.UntranslatedText)
+                ? "text:" + title.UntranslatedText
+                : title.Id != 0 ? "loc:" + title.Id.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : !string.IsNullOrWhiteSpace(rundown.name) ? "block:" + rundown.name
+                : string.Empty;
+            identity = new CheckpointIdentity(GetExpeditionKey(package), rundownName, expedition.Descriptive.PublicName);
+            if (!identity.IsValid)
+                throw new InvalidOperationException("rundown or expedition name is empty");
+            reason = string.Empty;
+            return true;
+        }
+        catch (Exception exception)
+        {
+            reason = exception.Message;
+            return false;
+        }
+    }
+
     private static bool SkipUnsupportedActiveExpedition()
     {
         var expedition = RundownManager.ActiveExpedition;
@@ -1055,6 +1121,7 @@ internal static class ResumeCoordinator
         PendingRecall = null;
         ResetPendingRecallDelay();
         ActiveExpeditionKey = string.Empty;
+        _activeIdentity = null;
         ResumeSelected = false;
         LastSelectionError = null;
         _hasFreshPackage = false;

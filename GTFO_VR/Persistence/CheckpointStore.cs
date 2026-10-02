@@ -8,8 +8,7 @@ namespace GTFO.PersistentCheckpoint.Persistence;
 internal static class CheckpointStore
 {
     private static readonly byte[] Magic = Encoding.ASCII.GetBytes("GTFOCP01");
-    private const int FormatVersion = 2;
-    private const int MinimumFormatVersion = 1;
+    private const int FormatVersion = 3;
     private const int HashLength = 32;
     private const int MaxStringBytes = 2048;
     private const int MaxPasses = 32;
@@ -27,11 +26,11 @@ internal static class CheckpointStore
         Directory.CreateDirectory(_directory);
     }
 
-    internal static SnapshotLoadResult TryLoad(string expeditionKey)
+    internal static SnapshotLoadResult TryLoad(CheckpointIdentity identity)
     {
         try
         {
-            var path = GetPath(expeditionKey);
+            var path = GetPath(identity);
             if (!File.Exists(path))
                 return new SnapshotLoadResult(null, null);
 
@@ -49,20 +48,22 @@ internal static class CheckpointStore
             if (!reader.ReadBytes(Magic.Length).SequenceEqual(Magic))
                 return new SnapshotLoadResult(null, "checkpoint magic is invalid");
             var formatVersion = reader.ReadInt32();
-            if (formatVersion < MinimumFormatVersion || formatVersion > FormatVersion)
+            if (formatVersion != FormatVersion)
                 return new SnapshotLoadResult(null, "checkpoint format is unsupported");
 
-            var snapshot = ReadSnapshot(reader, formatVersion);
+            var snapshot = ReadSnapshot(reader);
             if (stream.Position != stream.Length)
                 return new SnapshotLoadResult(null, "checkpoint contains trailing payload data");
-            if (!string.Equals(snapshot.ExpeditionKey, expeditionKey, StringComparison.Ordinal))
+            if (!string.Equals(snapshot.ExpeditionKey, identity.ExpeditionKey, StringComparison.Ordinal))
                 return new SnapshotLoadResult(null, "checkpoint expedition identity does not match its file");
+            if (snapshot.Identity != identity)
+                return new SnapshotLoadResult(null, "checkpoint mission names do not match the selected mission");
 
             return new SnapshotLoadResult(snapshot, null);
         }
         catch (Exception exception)
         {
-            Log.Warning($"Failed to load checkpoint for {expeditionKey}: {exception.Message}");
+            Log.Warning($"Failed to load checkpoint for {identity.ExpeditionKey}: {exception.Message}");
             return new SnapshotLoadResult(null, exception.Message);
         }
     }
@@ -72,11 +73,11 @@ internal static class CheckpointStore
         Enqueue(() => WriteAtomic(snapshot));
     }
 
-    internal static void EnqueueDelete(string expeditionKey)
+    internal static void EnqueueDelete(CheckpointIdentity identity)
     {
         Enqueue(() =>
         {
-            var path = GetPath(expeditionKey);
+            var path = GetPath(identity);
             if (File.Exists(path))
                 File.Delete(path);
         });
@@ -133,7 +134,7 @@ internal static class CheckpointStore
 
         var payloadBytes = payload.ToArray();
         var hash = SHA256.HashData(payloadBytes);
-        var path = GetPath(snapshot.ExpeditionKey);
+        var path = GetPath(snapshot.Identity);
         var temporaryPath = path + ".tmp";
 
         using (var output = new FileStream(temporaryPath, FileMode.Create, FileAccess.Write, FileShare.None))
@@ -152,6 +153,8 @@ internal static class CheckpointStore
         writer.Write(snapshot.BuildRevision);
         WriteString(writer, snapshot.ExpeditionKey);
         WriteString(writer, snapshot.RundownKey);
+        WriteString(writer, snapshot.RundownName);
+        WriteString(writer, snapshot.ExpeditionName);
         writer.Write(snapshot.Tier);
         writer.Write(snapshot.ExpeditionIndex);
         writer.Write(snapshot.HostSeed);
@@ -194,11 +197,13 @@ internal static class CheckpointStore
         }
     }
 
-    private static CheckpointSnapshot ReadSnapshot(BinaryReader reader, int formatVersion)
+    private static CheckpointSnapshot ReadSnapshot(BinaryReader reader)
     {
         var buildRevision = reader.ReadInt32();
         var expeditionKey = ReadString(reader);
         var rundownKey = ReadString(reader);
+        var rundownName = ReadString(reader);
+        var expeditionName = ReadString(reader);
         var tier = reader.ReadInt32();
         var expeditionIndex = reader.ReadInt32();
         var hostSeed = reader.ReadInt32();
@@ -218,20 +223,18 @@ internal static class CheckpointStore
             var lookup = reader.ReadUInt64();
             var characterIndex = reader.ReadInt32();
             var isBot = reader.ReadBoolean();
-            players.Add(formatVersion >= 2
-                ? new CapturedPlayer(
-                    lookup,
-                    characterIndex,
-                    isBot,
-                    reader.ReadBoolean(),
-                    reader.ReadSingle(),
-                    reader.ReadSingle(),
-                    reader.ReadSingle(),
-                    reader.ReadSingle(),
-                    reader.ReadSingle(),
-                    reader.ReadSingle(),
-                    reader.ReadSingle())
-                : new CapturedPlayer(lookup, characterIndex, isBot));
+            players.Add(new CapturedPlayer(
+                lookup,
+                characterIndex,
+                isBot,
+                reader.ReadBoolean(),
+                reader.ReadSingle(),
+                reader.ReadSingle(),
+                reader.ReadSingle(),
+                reader.ReadSingle(),
+                reader.ReadSingle(),
+                reader.ReadSingle(),
+                reader.ReadSingle()));
         }
 
         var passCount = ReadBoundedCount(reader, MaxPasses, "capture pass");
@@ -260,6 +263,8 @@ internal static class CheckpointStore
             BuildRevision = buildRevision,
             ExpeditionKey = expeditionKey,
             RundownKey = rundownKey,
+            RundownName = rundownName,
+            ExpeditionName = expeditionName,
             Tier = tier,
             ExpeditionIndex = expeditionIndex,
             HostSeed = hostSeed,
@@ -302,9 +307,6 @@ internal static class CheckpointStore
         return Encoding.UTF8.GetString(bytes);
     }
 
-    private static string GetPath(string expeditionKey)
-    {
-        var digest = SHA256.HashData(Encoding.UTF8.GetBytes(expeditionKey));
-        return Path.Combine(_directory, Convert.ToHexString(digest) + ".pcp");
-    }
+    private static string GetPath(CheckpointIdentity identity) => Path.Combine(_directory, identity.GetFilename());
+
 }
