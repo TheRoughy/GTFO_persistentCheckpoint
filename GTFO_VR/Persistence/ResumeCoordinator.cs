@@ -20,6 +20,8 @@ internal static class ResumeCoordinator
     private static int _requiredSlotCapacity = 4;
     private static bool _pendingRecallDelayStarted;
     private static float _pendingRecallNotBefore;
+    private static bool _pendingDoorPreparationStarted;
+    private static float _pendingDoorPreparationNotBefore;
     private static readonly Queue<PlayerResync> PlayerResyncQueue = new();
     private static PlayerResync? _activePlayerResync;
     private static CheckpointSnapshot? _playerResyncSnapshot;
@@ -32,6 +34,7 @@ internal static class ResumeCoordinator
     private static float _bridgeDeadline;
 
     private const float PendingRecallDelaySeconds = 3f;
+    private const float DoorPreparationDelaySeconds = 1f;
     private const float InitialPlayerResyncDelaySeconds = 1.5f;
     private const float PlayerResyncDelaySeconds = 0.25f;
     private const float PlayerResyncTimeoutSeconds = 20f;
@@ -118,7 +121,7 @@ internal static class ResumeCoordinator
 
     internal static void CaptureCheckpoint()
     {
-        if (_suppressCheckpointSave || !SNet.IsMaster)
+        if (_suppressCheckpointSave || _pendingDoorPreparationStarted || !SNet.IsMaster)
             return;
 
         try
@@ -183,8 +186,21 @@ internal static class ResumeCoordinator
     internal static bool TryRecallPending()
     {
         var snapshot = PendingRecall;
-        if (snapshot == null || !SNet.IsMaster || GameStateManager.CurrentStateName != eGameStateName.InLevel)
+        if (snapshot == null || !SNet.IsMaster)
+        {
+            ResetPendingRecallDelay();
             return false;
+        }
+        if (GameStateManager.CurrentStateName != eGameStateName.InLevel)
+        {
+            if (_pendingDoorPreparationStarted)
+            {
+                PendingRecall = null;
+                ResetPendingRecallDelay();
+                Log.Warning("Cancelled pending checkpoint recall after leaving InLevel during door preparation.");
+            }
+            return false;
+        }
         if (SNet.Capture.IsCapturing || SNet.Capture.IsRecalling || CheckpointManager.Current == null)
             return false;
 
@@ -203,6 +219,34 @@ internal static class ResumeCoordinator
         }
 
         if (Time.realtimeSinceStartup < _pendingRecallNotBefore)
+            return false;
+
+        if (!_pendingDoorPreparationStarted)
+        {
+            try
+            {
+                // Validate before any destructive preparation, not just before recall.
+                ValidateGeneratedLevel(snapshot);
+                // A destruction event can trigger other mods' checkpoint captures.
+                // Keep those transient captures from replacing the persistent save.
+                _pendingDoorPreparationStarted = true;
+                var prepared = DestroyedDoorPreparation.Prepare(snapshot);
+                _pendingDoorPreparationNotBefore = Time.realtimeSinceStartup
+                    + (prepared > 0 ? DoorPreparationDelaySeconds : 0f);
+                Log.Info($"Prepared {prepared} destroyed door(s) before persistent checkpoint recall; callback settling delay: {(prepared > 0 ? DoorPreparationDelaySeconds : 0f):F1} seconds.");
+                if (prepared > 0)
+                    return false;
+            }
+            catch (Exception exception)
+            {
+                PendingRecall = null;
+                ResetPendingRecallDelay();
+                Log.Error($"Persistent checkpoint door preparation failed: {exception}");
+                return false;
+            }
+        }
+
+        if (Time.realtimeSinceStartup < _pendingDoorPreparationNotBefore)
             return false;
 
         PendingRecall = null;
@@ -436,13 +480,7 @@ internal static class ResumeCoordinator
         SNet_CaptureBuffer? buffer = null;
         try
         {
-            var currentChecksum = (ulong)SNet.LocalPlayer.Session.levelChecksum;
-            if (currentChecksum != snapshot.LevelChecksum)
-                throw new InvalidOperationException($"Generated level checksum {currentChecksum} does not match checkpoint {snapshot.LevelChecksum}.");
-            if (!LobbyCompatibility.CanRepresent(snapshot, out var capacityReason))
-                throw new InvalidOperationException(capacityReason);
-            if (snapshot.Passes.Count != SNet_CaptureBuffer.PassCount)
-                throw new InvalidOperationException($"Checkpoint has {snapshot.Passes.Count} capture passes, game expects {SNet_CaptureBuffer.PassCount}.");
+            ValidateGeneratedLevel(snapshot);
 
             var connectedHumans = CaptureConnectedHumans(snapshot);
 
@@ -491,6 +529,17 @@ internal static class ResumeCoordinator
         {
             _suppressCheckpointSave = false;
         }
+    }
+
+    private static void ValidateGeneratedLevel(CheckpointSnapshot snapshot)
+    {
+        var currentChecksum = (ulong)SNet.LocalPlayer.Session.levelChecksum;
+        if (currentChecksum != snapshot.LevelChecksum)
+            throw new InvalidOperationException($"Generated level checksum {currentChecksum} does not match checkpoint {snapshot.LevelChecksum}.");
+        if (!LobbyCompatibility.CanRepresent(snapshot, out var capacityReason))
+            throw new InvalidOperationException(capacityReason);
+        if (snapshot.Passes.Count != SNet_CaptureBuffer.PassCount)
+            throw new InvalidOperationException($"Checkpoint has {snapshot.Passes.Count} capture passes, game expects {SNet_CaptureBuffer.PassCount}.");
     }
 
     private static List<PlayerResync> CaptureConnectedHumans(CheckpointSnapshot snapshot)
@@ -977,6 +1026,8 @@ internal static class ResumeCoordinator
     {
         _pendingRecallDelayStarted = false;
         _pendingRecallNotBefore = 0f;
+        _pendingDoorPreparationStarted = false;
+        _pendingDoorPreparationNotBefore = 0f;
     }
 
     private sealed record PlayerResync(ulong Lookup, string DisplayName);
