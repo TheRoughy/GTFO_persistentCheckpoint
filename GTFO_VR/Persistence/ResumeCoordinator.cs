@@ -52,10 +52,19 @@ internal static class ResumeCoordinator
 
     internal static void OnSelectingExpedition(ref pActiveExpedition package, ExpeditionInTierData expedition)
     {
-        if (_applyingPackage || !SNet.IsMaster || expedition == null)
+        if (_applyingPackage || !SNet.IsMaster)
             return;
 
         ResetSelection();
+        // The Tutorial bypasses the loadout page, so there is no resume choice.
+        // Do not load a save or replace seeds for any expedition that skips it.
+        if (expedition == null || expedition.SkipLobby)
+        {
+            if (expedition != null)
+                Log.Info($"Persistent checkpoints disabled for {GetExpeditionKey(package)}: expedition skips the lobby.");
+            return;
+        }
+
         var key = GetExpeditionKey(package);
         ActiveExpeditionKey = key;
         _freshPackage = ClonePackage(package);
@@ -86,7 +95,8 @@ internal static class ResumeCoordinator
 
     internal static void ToggleResume()
     {
-        if (!SNet.IsMaster || ActiveSnapshot == null || !_hasFreshPackage)
+        if (!SNet.IsMaster || SkipUnsupportedActiveExpedition()
+            || ActiveSnapshot == null || !_hasFreshPackage)
             return;
 
         var requestedState = !ResumeSelected;
@@ -103,7 +113,8 @@ internal static class ResumeCoordinator
 
     internal static void OnStartLevelResult(bool started)
     {
-        if (!started || !SNet.IsMaster || string.IsNullOrEmpty(ActiveExpeditionKey))
+        if (!started || !SNet.IsMaster || SkipUnsupportedActiveExpedition()
+            || string.IsNullOrEmpty(ActiveExpeditionKey))
             return;
 
         if (ResumeSelected && ActiveSnapshot != null)
@@ -126,6 +137,9 @@ internal static class ResumeCoordinator
 
         try
         {
+            if (SkipUnsupportedActiveExpedition())
+                return;
+
             var package = RundownManager.GetActiveExpeditionData();
             var key = GetExpeditionKey(package);
             var buffer = SNet.Capture.m_buffers[(int)eBufferType.Checkpoint];
@@ -201,6 +215,9 @@ internal static class ResumeCoordinator
             }
             return false;
         }
+        if (SkipUnsupportedActiveExpedition())
+            return false;
+
         if (SNet.Capture.IsCapturing || SNet.Capture.IsRecalling || CheckpointManager.Current == null)
             return false;
 
@@ -275,6 +292,11 @@ internal static class ResumeCoordinator
             ClearPlayerResyncs();
             return;
         }
+        if (_activePlayerResync == null && _playerResyncSnapshot == null && PlayerResyncQueue.Count == 0)
+            return;
+
+        if (SkipUnsupportedActiveExpedition())
+            return;
 
         if (_activePlayerResync != null)
         {
@@ -368,6 +390,9 @@ internal static class ResumeCoordinator
             ClearBridgeRecall();
             return;
         }
+        if (SkipUnsupportedActiveExpedition())
+            return;
+
         if (Time.realtimeSinceStartup < _bridgeNotBefore
             || SNet.Capture.IsCapturing
             || SNet.Capture.IsRecalling)
@@ -434,7 +459,8 @@ internal static class ResumeCoordinator
 
     internal static void ClearOnSuccess()
     {
-        if (!SNet.IsMaster || string.IsNullOrEmpty(ActiveExpeditionKey))
+        if (!SNet.IsMaster || SkipUnsupportedActiveExpedition()
+            || string.IsNullOrEmpty(ActiveExpeditionKey))
             return;
 
         PendingRecall = null;
@@ -1002,6 +1028,18 @@ internal static class ResumeCoordinator
 
     private static string GetExpeditionKey(pActiveExpedition package) =>
         $"{package.rundownKey.data}_{package.tier}_{package.expeditionIndex}";
+
+    private static bool SkipUnsupportedActiveExpedition()
+    {
+        var expedition = RundownManager.ActiveExpedition;
+        if (expedition != null && !expedition.SkipLobby)
+            return false;
+
+        // Also discard queued work if a nonstandard launch bypasses selection.
+        // Existing checkpoint files are left untouched, not deleted on launch.
+        ResetSelection();
+        return true;
+    }
 
     private static byte[] CopyBytes(Il2CppStructArray<byte> source)
     {
