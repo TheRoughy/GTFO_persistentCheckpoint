@@ -731,6 +731,9 @@ internal static class ResumeCoordinator
 
         var data = default(pAmmoStorageData);
         data.PlayerLookup = player.Lookup;
+        // Current builds reset storage to starting ammo when this flag is false,
+        // including zeroing carried resource packs and consumables.
+        data.hasSetAmmo = true;
         data.standardAmmo.Set(Mathf.Max(0f, standard), 500f);
         data.specialAmmo.Set(Mathf.Max(0f, special), 500f);
         data.classAmmo.Set(Mathf.Max(0f, saved.ClassAmmo), 500f);
