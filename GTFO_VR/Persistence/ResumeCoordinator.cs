@@ -51,6 +51,57 @@ internal static class ResumeCoordinator
     internal static bool HasResumeChoice => ActiveSnapshot != null && !string.IsNullOrEmpty(ActiveExpeditionKey);
     internal static bool ShouldShowControl => HasResumeChoice || LastSelectionError != null;
 
+    internal static bool ShouldShowCreateControl => SNet.IsMaster
+        && GameStateManager.CurrentStateName == eGameStateName.InLevel
+        && RundownManager.ActiveExpedition != null
+        && !RundownManager.ActiveExpedition.SkipLobby;
+
+    internal static bool CanCreateManualCheckpoint => ShouldShowCreateControl
+        && CheckpointManager.Current != null
+        && SNet.Capture != null
+        && !SNet.Capture.IsCapturing && !SNet.Capture.IsRecalling
+        && !SNet.MasterManagement.IsMigrating
+        && !_suppressCheckpointSave && !_pendingDoorPreparationStarted
+        && PendingRecall == null && _bridgeSnapshot == null
+        && _playerResyncSnapshot == null && _activePlayerResync == null
+        && PlayerResyncQueue.Count == 0;
+
+    internal static void CreateManualCheckpoint()
+    {
+        // Recheck at completion of the native long press: authority or game state
+        // may have changed while the button was being held.
+        if (!CanCreateManualCheckpoint)
+            return;
+
+        try
+        {
+            if (GetUnreadyConnectedPlayers().Count > 0)
+            {
+                ShowHostWarning("CHECKPOINT NOT CREATED\nWAIT FOR PLAYERS TO FINISH SYNCING");
+                return;
+            }
+
+            var package = RundownManager.GetActiveExpeditionData();
+            if (!TryGetIdentity(package, RundownManager.ActiveExpedition, out _, out var reason))
+                throw new InvalidOperationException(reason);
+
+            var player = PlayerManager.GetLocalPlayerAgent();
+            if (player == null)
+                throw new InvalidOperationException("local player agent is unavailable");
+
+            // Same native sequence used by checkpoint scans and the xray console.
+            // CaptureCheckpointPatch persists the completed capture as usual.
+            CheckpointManager.StoreCheckpoint(player.EyePosition);
+            SNet.Capture.CaptureGameState(eBufferType.Checkpoint);
+            Log.Info($"Manually created checkpoint for {GetExpeditionKey(package)}.");
+        }
+        catch (Exception exception)
+        {
+            Log.Error($"Manual checkpoint creation failed: {exception}");
+            ShowHostWarning("CHECKPOINT CREATION FAILED\nSEE HOST LOG");
+        }
+    }
+
     internal static void OnSelectingExpedition(ref pActiveExpedition package, ExpeditionInTierData expedition)
     {
         if (_applyingPackage || !SNet.IsMaster)
