@@ -1,0 +1,8 @@
+{
+  "name": "PersistentCheckpoint",
+  "description": "Host-only persistent checkpoints. Resume expeditions after quitting, or create a checkpoint anywhere. Supports modded rundowns and LobbyExpansion.",
+  "website_url": "https://github.com/TheRoughy/GTFO_persistentCheckpoint",
+  "dependencies": [
+    "BepInEx-BepInExPack_GTFO-3.2.3"
+  ]
+}

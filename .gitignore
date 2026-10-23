@@ -3,8 +3,8 @@
 
 #Staged builds
 
-GTFO_VR*.zip
-GTFO_VR*.rar
+GTFO_PersistentCheckpoint*.zip
+GTFO_PersistentCheckpoint*.rar
 
 # Notepad++ backups...
 *.bak
@@ -261,3 +261,9 @@ paket-files/
 .idea/
 *.sln.iml
 
+gtfo_6_mono_decompiled
+
+# Generated Thunderstore packages and Python caches
+/dist/
+__pycache__/
+*.py[cod]

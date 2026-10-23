@@ -2,7 +2,7 @@
   <PropertyGroup>
     <TargetFramework>net6.0</TargetFramework>
     <OutputType>Library</OutputType>
-    <AssemblyName>GTFO_PersistentCheckpoint</AssemblyName>
+    <AssemblyName>TheRoughy.PersistentCheckpoint</AssemblyName>
     <RootNamespace>GTFO.PersistentCheckpoint</RootNamespace>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <ImplicitUsings>enable</ImplicitUsings>
@@ -42,6 +42,6 @@
     <Reference Include="Utils-ASM" HintPath="$(GTFO_PATH)\BepInEx\interop\Utils-ASM.dll" Private="false" />
   </ItemGroup>
   <Target Name="Deploy" AfterTargets="Build" Condition="'$(DeployPlugin)' == 'true'">
-    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GTFO_PATH)\BepInEx\plugins" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(GTFO_PATH)\BepInEx\plugins\TheRoughy-PersistentCheckpoint" />
   </Target>
 </Project>
