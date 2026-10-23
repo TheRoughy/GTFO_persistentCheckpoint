@@ -93,10 +93,32 @@ The release icon is read from `thunderstore/images/icon.png` and must be a valid
 
 Place optional screenshots in `thunderstore/images/create-checkpoint.png` and `thunderstore/images/resume-checkpoint.png`. They are bundled when present. Embed screenshots directly in `thunderstore/README.md` using normal Markdown image links with public, absolute image URLs. The packager copies that README byte-for-byte; it does not insert images or expand placeholders.
 
-Run packaging tests with:
+Package format reference: [Thunderstore's packaging documentation](https://wiki.thunderstore.io/mods/creating-a-package).
+
+## Tests
+
+Both test suites run without launching GTFO or loading Unity. They are development checks and are not included in release ZIPs. Run these commands from the repository root.
+
+### Release packaging
+
+Requires Python 3.9+ with no third-party Python dependencies:
 
 ```text
 python -m unittest discover -s tests -p test_release.py
 ```
 
-Package format reference: [Thunderstore's packaging documentation](https://wiki.thunderstore.io/mods/creating-a-package).
+Checks package metadata, required assets, exact README copying, archive contents, reproducibility, and build-command configuration. Test files are created in temporary directories, not in the game installation.
+
+### Checkpoint persistence
+
+Requires the .NET SDK. This is a standalone console test harness, so run it with `dotnet run`, not `dotnet test`:
+
+```text
+dotnet run --project tests/CheckpointPersistence.Tests/CheckpointPersistence.Tests.csproj -c Release
+```
+
+The harness compiles the actual checkpoint identity, snapshot and store source files with lightweight logging/path substitutes. It checks a fixed filename hash, mission isolation, byte-for-byte save round-trips (including expanded-lobby metadata and player resources), rejection of invalid files, and deletion scoped to the selected mission.
+
+It creates and removes its own scratch directory under the test output. An optional checkpoint file can be supplied after `--` for additional round-trip checks; that input is only read, and all changes are made to test-owned copies.
+
+These tests do not verify native game-state restoration, UI interactions, multiplayer synchronization, or other mods' behavior. Those still require in-game testing.

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RollForward>Major</RollForward>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../GTFO_PersistentCheckpoint/Persistence/CheckpointIdentity.cs" Link="CheckpointIdentity.cs" />
+    <Compile Include="../../GTFO_PersistentCheckpoint/Persistence/CheckpointSnapshot.cs" Link="CheckpointSnapshot.cs" />
+    <Compile Include="../../GTFO_PersistentCheckpoint/Persistence/CheckpointStore.cs" Link="CheckpointStore.cs" />
+  </ItemGroup>
+</Project>
