@@ -2,6 +2,8 @@
 
 A host-side BepInEx IL2CPP plugin that preserves GTFO's latest checkpoint across game sessions.
 
+[Download on Thunderstore](https://thunderstore.io/c/gtfo/p/TheRoughy/PersistentCheckpoint/)
+
 Quit for the night and continue the same expedition later, or create your own checkpoint wherever you need one. Only the host needs this mod; other players can join without it.
 
 ## Installation
